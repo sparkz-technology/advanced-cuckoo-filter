@@ -1,0 +1,22 @@
+{
+  "name": "advanced-cuckoo-filter",
+  "version": "1.0.0",
+  "description": "An advanced Cuckoo Filter with auto-persistence, Parquet & JSON support, and dynamic resizing.",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "test": "node test.js"
+  },
+  "keywords": [
+    "cuckoo filter",
+    "data structure",
+    "parquet",
+    "nodejs",
+    "filter"
+  ],
+  "author": "Sutharsan G",
+  "license": "MIT",
+  "dependencies": {
+    "parquetjs-lite": "^0.8.7"
+  }
+}
