@@ -1,6 +1,6 @@
 {
   "name": "advanced-cuckoo-filter",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "An advanced Cuckoo Filter with auto-persistence, Parquet & JSON support, and dynamic resizing.",
   "main": "index.js",
   "type": "module",
