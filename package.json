@@ -5,6 +5,10 @@
   "main": "index.js",
   "type": "module",
   "types": "index.d.ts",
+  "exports": {
+    "import": "./index.js",
+    "require": "./index.cjs"
+  },
   "scripts": {
     "test": "node test.js"
   },
