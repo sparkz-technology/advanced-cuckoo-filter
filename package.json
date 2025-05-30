@@ -4,6 +4,7 @@
   "description": "An advanced Cuckoo Filter with auto-persistence, Parquet & JSON support, and dynamic resizing.",
   "main": "index.js",
   "type": "module",
+  "types": "index.d.ts",
   "scripts": {
     "test": "node test.js"
   },
