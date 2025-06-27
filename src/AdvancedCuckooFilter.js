@@ -1,239 +1,346 @@
-import crypto from 'crypto';
-import fs from 'fs/promises';
-import parquet from 'parquetjs-lite';
+/**
+ * Advanced Cuckoo Filter Implementation
+ * Date: 2025-06-27
+ * Author: GitHub Copilot for sparkz-technology
+ */
 
 class AdvancedCuckooFilter {
-    constructor({
-        bucketCount = 2 ** 16,
-        bucketSize = 4,
-        fingerprintSize = 1, // bytes
-        maxKicks = 500,
-        autoPersist = false,
-        persistPath = './cuckoo-filter.parquet',
-        hashAlgorithm = 'sha256' // allow different hashing algorithms
-    } = {}) {
-        this.bucketCount = bucketCount;
-        this.bucketSize = bucketSize;
-        this.fingerprintSize = fingerprintSize;
-        this.maxKicks = maxKicks;
-        this.autoPersist = autoPersist;
-        this.persistPath = persistPath;
-        this.hashAlgorithm = hashAlgorithm;
-        this.buckets = Array.from({ length: bucketCount }, () => []);
-        this.hooks = {};
+  /**
+   * Initialize a Cuckoo Filter
+   * @param {number} capacity - The initial capacity (number of buckets)
+   * @param {number} bucketSize - Number of entries per bucket (default: 4)
+   * @param {number} fingerprintBits - Number of bits for fingerprint (default: 8)
+   * @param {number} maxNumKicks - Maximum number of kicks for insertion (default: 500)
+   */
+  constructor(capacity, bucketSize = 4, fingerprintBits = 8, maxNumKicks = 500) {
+    if (!capacity || capacity <= 0) {
+      throw new Error("Capacity must be a positive number");
     }
-
-    async init() {
-        try {
-            await fs.access(this.persistPath);
-            if (this.persistPath.endsWith('.parquet')) {
-                await this.loadFromParquet(this.persistPath);
-            } else if (this.persistPath.endsWith('.json')) {
-                await this.loadFromJSON(this.persistPath);
-            }
-            console.log('Filter loaded from file.');
-        } catch {
-            console.log('No existing filter found. Starting fresh.');
-        }
+    
+    this.capacity = this._nextPowerOf2(capacity); // Ensure capacity is power of 2 for better hashing
+    this.bucketSize = bucketSize;
+    this.fingerprintBits = fingerprintBits;
+    this.maxNumKicks = maxNumKicks;
+    this.size = 0;
+    
+    // Calculate fingerprint mask based on bits (e.g., 8 bits = 0xFF)
+    this.fingerprintMask = (1 << fingerprintBits) - 1;
+    
+    // Initialize buckets as array of arrays
+    this.buckets = new Array(this.capacity);
+    for (let i = 0; i < this.capacity; i++) {
+      this.buckets[i] = new Array(this.bucketSize).fill(null);
     }
+    
+    // For stats tracking
+    this.insertions = 0;
+    this.kicks = 0;
+  }
 
-    setHooks({ onInsert, onDelete, onResize } = {}) {
-        this.hooks = { onInsert, onDelete, onResize };
+  /**
+   * Insert an item into the filter
+   * @param {*} item - The item to insert
+   * @returns {boolean} - True if insertion succeeded, false otherwise
+   */
+  insert(item) {
+    if (item === null || item === undefined) {
+      throw new Error("Cannot insert null or undefined items");
     }
-
-    _hash(data, seed = 0) {
-        // Use a Buffer to combine seed and data for hashing
-        const seedBuffer = Buffer.alloc(4);
-        seedBuffer.writeUInt32BE(seed);
-        return crypto
-            .createHash(this.hashAlgorithm)
-            .update(Buffer.concat([seedBuffer, Buffer.from(data)]))
-            .digest();
+    
+    // Generate fingerprint and calculate bucket indices
+    const fingerprint = this._generateFingerprint(item);
+    const hash = this._hash(item);
+    
+    let i1 = this._getFirstBucketIndex(hash);
+    let i2 = this._getSecondBucketIndex(i1, fingerprint);
+    
+    // Try to insert into the first bucket
+    if (this._insertIntoBucket(i1, fingerprint)) {
+      this.size++;
+      this.insertions++;
+      return true;
     }
-
-    _fingerprint(item) {
-        return this._hash(item).slice(0, this.fingerprintSize);
+    
+    // Try to insert into the second bucket
+    if (this._insertIntoBucket(i2, fingerprint)) {
+      this.size++;
+      this.insertions++;
+      return true;
     }
-
-    _index(item) {
-        return this._hash(item).readUInt32BE(0) % this.bucketCount;
+    
+    // Both buckets are full, perform cuckoo kicking
+    let currentIndex = Math.random() < 0.5 ? i1 : i2;
+    let currentFingerprint = fingerprint;
+    
+    // Perform cuckoo kicking
+    for (let n = 0; n < this.maxNumKicks; n++) {
+      this.kicks++;
+      
+      // Select a random entry from the bucket
+      const randPosition = Math.floor(Math.random() * this.bucketSize);
+      
+      // Swap fingerprints
+      const oldFingerprint = this.buckets[currentIndex][randPosition];
+      this.buckets[currentIndex][randPosition] = currentFingerprint;
+      currentFingerprint = oldFingerprint;
+      
+      // Calculate the alternate location for the evicted item
+      currentIndex = this._getSecondBucketIndex(currentIndex, currentFingerprint);
+      
+      // Try to insert the evicted item
+      if (this._insertIntoBucket(currentIndex, currentFingerprint)) {
+        this.size++;
+        this.insertions++;
+        return true;
+      }
     }
+    
+    // Exceeded max kicks - filter is too full
+    // In a production system, you might resize the filter here
+    return false;
+  }
 
-    _altIndex(fp, index) {
-        const fpHash = this._hash(fp.toString('hex'), 1);
-        const raw = index ^ fpHash.readUInt32BE(0);
-        return ((raw % this.bucketCount) + this.bucketCount) % this.bucketCount;
+  /**
+   * Check if an item might be in the filter
+   * @param {*} item - The item to check
+   * @returns {boolean} - True if the item might be in the filter, false if definitely not
+   */
+  lookup(item) {
+    if (item === null || item === undefined) {
+      return false;
     }
+    
+    const fingerprint = this._generateFingerprint(item);
+    const hash = this._hash(item);
+    
+    const i1 = this._getFirstBucketIndex(hash);
+    const i2 = this._getSecondBucketIndex(i1, fingerprint);
+    
+    return (
+      this._bucketContainsFingerprint(i1, fingerprint) ||
+      this._bucketContainsFingerprint(i2, fingerprint)
+    );
+  }
 
-
-    _tryInsert(index, fp) {
-        const bucket = this.buckets[index];
-        if (bucket.length < this.bucketSize) {
-            bucket.push(fp);
-            return true;
-        }
-        return false;
+  /**
+   * Remove an item from the filter
+   * @param {*} item - The item to remove
+   * @returns {boolean} - True if the item was removed, false otherwise
+   */
+  remove(item) {
+    if (item === null || item === undefined) {
+      return false;
     }
-
-    async insert(item) {
-        const fp = this._fingerprint(item);
-        const i1 = this._index(item);
-        const i2 = this._altIndex(fp, i1);
-
-        if (this._tryInsert(i1, fp) || this._tryInsert(i2, fp)) {
-            if (this.hooks?.onInsert) this.hooks.onInsert(item, fp);
-            if (this.autoPersist) await this.save(this.persistPath);
-            return true;
-        }
-
-        let index = Math.random() < 0.5 ? i1 : i2;
-        let currentFp = fp;
-
-        for (let n = 0; n < this.maxKicks; n++) {
-            const bucket = this.buckets[index];
-            const rand = Math.floor(Math.random() * bucket.length);
-            [currentFp, bucket[rand]] = [bucket[rand], currentFp];
-            index = this._altIndex(currentFp, index);
-            if (this._tryInsert(index, currentFp)) {
-                if (this.hooks?.onInsert) this.hooks.onInsert(item, fp);
-                if (this.autoPersist) await this.save(this.persistPath);
-                return true;
-            }
-        }
-
-        this._resize();
-        if (this.hooks?.onResize) this.hooks.onResize(this.bucketCount);
-        return this.insert(item);
+    
+    const fingerprint = this._generateFingerprint(item);
+    const hash = this._hash(item);
+    
+    const i1 = this._getFirstBucketIndex(hash);
+    const i2 = this._getSecondBucketIndex(i1, fingerprint);
+    
+    if (this._removeFromBucket(i1, fingerprint)) {
+      this.size--;
+      return true;
     }
-
-    contains(item) {
-        const fp = this._fingerprint(item);
-        const i1 = this._index(item);
-        const i2 = this._altIndex(fp, i1);
-        return (
-            this.buckets[i1].some(b => b.equals(fp)) ||
-            this.buckets[i2].some(b => b.equals(fp))
-        );
+    
+    if (this._removeFromBucket(i2, fingerprint)) {
+      this.size--;
+      return true;
     }
+    
+    return false;
+  }
 
-    async delete(item) {
-        const fp = this._fingerprint(item);
-        const i1 = this._index(item);
-        const i2 = this._altIndex(fp, i1);
+  /**
+   * Get the current load factor of the filter
+   * @returns {number} - Current load factor (0.0 - 1.0)
+   */
+  getLoadFactor() {
+    return this.size / (this.capacity * this.bucketSize);
+  }
 
-        const b1 = this.buckets[i1];
-        const i = b1.findIndex(b => b.equals(fp));
-        if (i !== -1) {
-            b1.splice(i, 1);
-            if (this.hooks?.onDelete) this.hooks.onDelete(item, fp);
-            if (this.autoPersist) await this.save(this.persistPath);
-            return true;
-        }
-
-        const b2 = this.buckets[i2];
-        const j = b2.findIndex(b => b.equals(fp));
-        if (j !== -1) {
-            b2.splice(j, 1);
-            if (this.hooks?.onDelete) this.hooks.onDelete(item, fp);
-            if (this.autoPersist) await this.save(this.persistPath);
-            return true;
-        }
-
-        return false;
+  /**
+   * Reset the filter to empty state
+   */
+  clear() {
+    for (let i = 0; i < this.capacity; i++) {
+      this.buckets[i] = new Array(this.bucketSize).fill(null);
     }
+    this.size = 0;
+    this.insertions = 0;
+    this.kicks = 0;
+  }
 
-    _resize() {
-        const oldBuckets = this.buckets;
-        this.bucketCount *= 2;
-        this.buckets = Array.from({ length: this.bucketCount }, () => []);
-        for (const bucket of oldBuckets) {
-            for (const fp of bucket) {
-                const i1 = this._index(fp.toString('hex'));
-                const i2 = this._altIndex(fp, i1);
-                if (!this._tryInsert(i1, fp) && !this._tryInsert(i2, fp)) {
-                    throw new Error('Resize failed');
-                }
-            }
-        }
+  /**
+   * Get statistics about the filter
+   * @returns {Object} - Statistics object
+   */
+  getStats() {
+    return {
+      capacity: this.capacity,
+      bucketSize: this.bucketSize,
+      fingerprintBits: this.fingerprintBits,
+      size: this.size,
+      loadFactor: this.getLoadFactor(),
+      insertions: this.insertions,
+      kicks: this.kicks,
+      averageKicksPerInsertion: this.insertions > 0 ? this.kicks / this.insertions : 0
+    };
+  }
+
+  /**
+   * Try to insert a fingerprint into a bucket
+   * @private
+   * @param {number} index - The bucket index
+   * @param {number} fingerprint - The fingerprint to insert
+   * @returns {boolean} - True if insertion succeeded, false otherwise
+   */
+  _insertIntoBucket(index, fingerprint) {
+    const bucket = this.buckets[index];
+    for (let i = 0; i < this.bucketSize; i++) {
+      if (bucket[i] === null) {
+        bucket[i] = fingerprint;
+        return true;
+      }
     }
+    return false;
+  }
 
-    stats() {
-        let total = 0;
-        for (const bucket of this.buckets) total += bucket.length;
-        return {
-            items: total,
-            capacity: this.bucketCount * this.bucketSize,
-            loadFactor: total / (this.bucketCount * this.bucketSize),
-            bucketCount: this.bucketCount,
-            bucketSize: this.bucketSize
-        };
+  /**
+   * Check if a bucket contains a given fingerprint
+   * @private
+   * @param {number} index - The bucket index
+   * @param {number} fingerprint - The fingerprint to check
+   * @returns {boolean} - True if the bucket contains the fingerprint
+   */
+  _bucketContainsFingerprint(index, fingerprint) {
+    const bucket = this.buckets[index];
+    for (let i = 0; i < this.bucketSize; i++) {
+      if (bucket[i] === fingerprint) {
+        return true;
+      }
     }
+    return false;
+  }
 
-    async saveToParquet(filePath) {
-        const schema = new parquet.ParquetSchema({
-            fingerprint: { type: 'BYTE_ARRAY' }
-        });
-
-        const writer = await parquet.ParquetWriter.openFile(schema, filePath);
-        for (const bucket of this.buckets) {
-            for (const fp of bucket) {
-                await writer.appendRow({ fingerprint: fp });
-            }
-        }
-        await writer.close();
+  /**
+   * Remove a fingerprint from a bucket
+   * @private
+   * @param {number} index - The bucket index
+   * @param {number} fingerprint - The fingerprint to remove
+   * @returns {boolean} - True if removed, false otherwise
+   */
+  _removeFromBucket(index, fingerprint) {
+    const bucket = this.buckets[index];
+    for (let i = 0; i < this.bucketSize; i++) {
+      if (bucket[i] === fingerprint) {
+        bucket[i] = null;
+        return true;
+      }
     }
+    return false;
+  }
 
-    async loadFromParquet(filePath) {
-        const reader = await parquet.ParquetReader.openFile(filePath);
-        const cursor = reader.getCursor();
-        let record;
-        while ((record = await cursor.next())) {
-            const fp = record.fingerprint;
-            const i1 = this._index(fp.toString('hex'));
-            const i2 = this._altIndex(fp, i1);
-            if (!this._tryInsert(i1, fp) && !this._tryInsert(i2, fp)) {
-                this._resize();
-                const i1_new = this._index(fp.toString('hex'));
-                const i2_new = this._altIndex(fp, i1_new);
-                this._tryInsert(i1_new, fp) || this._tryInsert(i2_new, fp);
-            }
-        }
-        await reader.close();
-    }
+  /**
+   * Calculate first bucket index from hash
+   * @private
+   * @param {number} hash - The hash value
+   * @returns {number} - The first bucket index
+   */
+  _getFirstBucketIndex(hash) {
+    return hash % this.capacity;
+  }
 
-    async saveToJSON(filePath) {
-        const data = this.buckets.map(bucket =>
-            bucket.map(fp => fp.toString('hex'))
-        );
-        await fs.writeFile(filePath, JSON.stringify(data, null, 2));
-    }
+  /**
+   * Calculate second bucket index using the first index and fingerprint
+   * @private
+   * @param {number} i1 - The first bucket index
+   * @param {number} fingerprint - The item's fingerprint
+   * @returns {number} - The second bucket index
+   */
+  _getSecondBucketIndex(i1, fingerprint) {
+    // Use alternative hash function for the second bucket
+    // Using fingerprint to calculate second hash
+    const hash2 = this._hash2(fingerprint);
+    return (i1 ^ hash2) % this.capacity;
+  }
 
-    async loadFromJSON(filePath) {
-        const data = JSON.parse(await fs.readFile(filePath, 'utf-8'));
-        this.buckets = data.map(bucket =>
-            bucket.map(hex => Buffer.from(hex, 'hex'))
-        );
-    }
+  /**
+   * Generate a fingerprint for an item
+   * @private
+   * @param {*} item - The item
+   * @returns {number} - The fingerprint value
+   */
+  _generateFingerprint(item) {
+    // Secondary hash for the fingerprint
+    const hash = this._hash(item.toString() + 'fingerprint');
+    let fingerprint = hash & this.fingerprintMask;
+    
+    // Ensure fingerprint is never 0 (we use 0 to indicate empty)
+    if (fingerprint === 0) fingerprint = 1;
+    
+    return fingerprint;
+  }
 
-    async save(filePath) {
-        if (filePath.endsWith('.parquet')) {
-            await this.saveToParquet(filePath);
-        } else if (filePath.endsWith('.json')) {
-            await this.saveToJSON(filePath);
-        } else {
-            throw new Error('Unsupported file extension for saving. Use .parquet or .json');
-        }
+  /**
+   * Hash function for items
+   * @private
+   * @param {*} item - The item to hash
+   * @returns {number} - A hash value
+   */
+  _hash(item) {
+    let str = item.toString();
+    let hash = 0;
+    
+    // Simple but effective string hash
+    for (let i = 0; i < str.length; i++) {
+      const char = str.charCodeAt(i);
+      hash = ((hash << 5) - hash) + char;
+      hash |= 0; // Convert to 32bit integer
     }
-
-    async load(filePath) {
-        if (filePath.endsWith('.parquet')) {
-            await this.loadFromParquet(filePath);
-        } else if (filePath.endsWith('.json')) {
-            await this.loadFromJSON(filePath);
-        } else {
-            throw new Error('Unsupported file extension for loading. Use .parquet or .json');
-        }
+    
+    // Ensure positive hash value
+    return Math.abs(hash);
+  }
+  
+  /**
+   * Second hash function used for the alternate bucket calculation
+   * @private
+   * @param {number} value - Value to hash
+   * @returns {number} - A hash value
+   */
+  _hash2(value) {
+    // FNV-1a hash variation
+    const prime = 16777619;
+    let hash = 2166136261;
+    
+    // Convert to string to hash
+    const str = value.toString();
+    
+    for (let i = 0; i < str.length; i++) {
+      hash ^= str.charCodeAt(i);
+      hash *= prime;
     }
+    
+    return Math.abs(hash);
+  }
+  
+  /**
+   * Find the next power of 2
+   * @private
+   * @param {number} n - The input number
+   * @returns {number} - The next power of 2
+   */
+  _nextPowerOf2(n) {
+    n--; // Handle case when n is already a power of 2
+    n |= n >>> 1;
+    n |= n >>> 2;
+    n |= n >>> 4;
+    n |= n >>> 8;
+    n |= n >>> 16;
+    n++;
+    return n;
+  }
 }
 
-export default AdvancedCuckooFilter;
+module.exports = AdvancedCuckooFilter;

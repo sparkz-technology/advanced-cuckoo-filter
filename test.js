@@ -1,40 +1,82 @@
-import AdvancedCuckooFilter from './src/AdvancedCuckooFilter.js';
+const AdvancedCuckooFilter = require('./src/AdvancedCuckooFilter');
 
-(async () => {
-  const filter = new AdvancedCuckooFilter({
-    autoPersist: false,
-    bucketCount: 2 ** 12,
-    persistPath: './filter-data.parquet'
-  });
+// Create a new cuckoo filter with initial capacity of 1000 items
+const filter = new AdvancedCuckooFilter(1000, 4, 8);
 
-  await filter.init();
+// Test basic insertion and lookup
+console.log('\n----- Basic Operations Test -----');
+filter.insert('apple');
+filter.insert('banana');
+filter.insert('cherry');
 
-  filter.setHooks({
-    onInsert: (item) => console.log(`Inserted: ${item}`),
-    onDelete: (item) => console.log(`Deleted: ${item}`),
-    onResize: (newSize) => console.log(`Resized to: ${newSize} buckets`)
-  });
+console.log(`Contains 'apple'? ${filter.lookup('apple')}`);
+console.log(`Contains 'banana'? ${filter.lookup('banana')}`);
+console.log(`Contains 'cherry'? ${filter.lookup('cherry')}`);
+console.log(`Contains 'grape'? ${filter.lookup('grape')}`);
 
-  console.log('Inserting...');
-  await filter.insert('apple');
-  await filter.insert('banana');
-  await filter.insert('orange');
+// Test removal
+console.log('\n----- Removal Test -----');
+console.log(`Removed 'banana': ${filter.remove('banana')}`);
+console.log(`Contains 'banana' after removal? ${filter.lookup('banana')}`);
+console.log(`Contains 'apple' after removal? ${filter.lookup('apple')}`);
 
-  console.log('Checking contains...');
-  console.log('apple:', filter.contains('apple'));   // true
-  console.log('banana:', filter.contains('banana')); // true
-  console.log('grape:', filter.contains('grape'));   // false (probably)
+// Test false positive rate
+console.log('\n----- False Positive Test -----');
+// Insert many items
+for (let i = 0; i < 10000; i++) {
+  filter.insert(`item-${i}`);
+}
 
-  console.log('Deleting apple...');
-  await filter.delete('apple');
-  console.log('apple:', filter.contains('apple'));   // false
+// Check false positives
+let falsePositives = 0;
+const testSize = 10000;
+for (let i = 0; i < testSize; i++) {
+  if (filter.lookup(`non-existent-${i}`)) {
+    falsePositives++;
+  }
+}
 
-  console.log('Saving to Parquet...');
-  await filter.saveToParquet('./filter-data.parquet');
+console.log(`Inserted 10,000 items`);
+console.log(`False positive count: ${falsePositives} out of ${testSize} lookups`);
+console.log(`False positive rate: ${(falsePositives / testSize * 100).toFixed(4)}%`);
 
-  console.log('Loading from Parquet...');
-  await filter.loadFromParquet('./filter-data.parquet');
-  console.log('banana:', filter.contains('banana')); // true
+// Performance test
+console.log('\n----- Performance Test -----');
+const largeFilter = new AdvancedCuckooFilter(100000, 4, 12);
+const largeInsertCount = 50000;
 
-  console.log('Stats:', filter.stats());
-})();
+console.time('Insert performance');
+for (let i = 0; i < largeInsertCount; i++) {
+  largeFilter.insert(`perf-item-${i}`);
+}
+console.timeEnd('Insert performance');
+
+console.time('Lookup performance');
+for (let i = 0; i < largeInsertCount; i++) {
+  largeFilter.lookup(`perf-item-${i}`);
+}
+console.timeEnd('Lookup performance');
+
+// Print stats
+console.log('\n----- Filter Statistics -----');
+console.log(filter.getStats());
+
+// Test high load factor
+console.log('\n----- High Load Factor Test -----');
+const smallFilter = new AdvancedCuckooFilter(32, 4, 8);
+let insertedCount = 0;
+
+// Try to fill it up
+for (let i = 0; i < 200; i++) {
+  const success = smallFilter.insert(`highload-${i}`);
+  if (success) {
+    insertedCount++;
+  } else {
+    console.log(`Failed to insert after ${insertedCount} items`);
+    break;
+  }
+}
+
+console.log(`Successfully inserted ${insertedCount} items`);
+console.log(`Final load factor: ${smallFilter.getLoadFactor().toFixed(2)}`);
+console.log(`Kicks performed: ${smallFilter.getStats().kicks}`);

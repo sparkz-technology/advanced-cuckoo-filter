@@ -1,96 +1,73 @@
 # Advanced Cuckoo Filter
 
-An advanced, persistent, and resizable Cuckoo Filter for Node.js with Parquet and JSON storage support.
+A high-performance JavaScript implementation of a Cuckoo Filter, a probabilistic data structure that supports approximate membership queries with better space efficiency and performance characteristics compared to Bloom Filters.
 
 ## Features
 
-- Auto persistence to Parquet or JSON
-- Dynamic resizing
-- Fast insert, delete, and lookup operations
-- Usage statistics and hooks for custom logic
-
-## Installation
-
-```bash
-npm install advanced-cuckoo-filter
-```
+- **Efficient Membership Testing**: Fast approximate membership testing with controllable false positive rate
+- **Element Deletion Support**: Unlike Bloom filters, Cuckoo filters support element deletion
+- **Configurable Parameters**: Adjust bucket size, fingerprint length, and other parameters
+- **High Load Factor**: Works efficiently even at high occupancy rates
+- **Performance Monitoring**: Built-in statistics tracking
 
 ## Usage
 
 ```javascript
-import AdvancedCuckooFilter from 'advanced-cuckoo-filter';
+const AdvancedCuckooFilter = require('./AdvancedCuckooFilter');
 
-const filter = new AdvancedCuckooFilter({
-  autoPersist: true,
-  persistPath: './filter.parquet',
-});
+// Create a new filter with initial capacity of 1000 items
+// bucketSize = 4, fingerprintBits = 8
+const filter = new AdvancedCuckooFilter(1000, 4, 8);
 
-await filter.init();
+// Insert items
+filter.insert('apple');
+filter.insert('banana');
 
-await filter.insert('hello');
-console.log(filter.contains('hello')); // true
+// Check membership
+console.log(filter.lookup('apple'));  // true
+console.log(filter.lookup('grape'));  // false (true would be a false positive)
+
+// Remove items
+filter.remove('apple');
+console.log(filter.lookup('apple'));  // false
+
+// Get statistics
+console.log(filter.getStats());
 ```
 
 ## API
 
-### constructor(options)
+### Constructor
 
-Create a new instance of the filter.
+```javascript
+const filter = new AdvancedCuckooFilter(capacity, bucketSize, fingerprintBits, maxNumKicks);
+```
 
-- `options.autoPersist` (boolean): Automatically save changes.
-- `options.persistPath` (string): File path for persistence (.parquet or .json).
+- `capacity`: Initial number of buckets (will be rounded to next power of 2)
+- `bucketSize`: Number of entries per bucket (default: 4)
+- `fingerprintBits`: Number of bits for fingerprint (default: 8)
+- `maxNumKicks`: Maximum number of kicks for insertion (default: 500)
 
-### async init()
+### Methods
 
-Initialize the filter (loads persisted data if available).
+- `insert(item)`: Insert an item into the filter. Returns `true` if successful.
+- `lookup(item)`: Check if an item might be in the filter. Returns `true` if the item might be present.
+- `remove(item)`: Remove an item from the filter. Returns `true` if successful.
+- `clear()`: Remove all items from the filter.
+- `getLoadFactor()`: Returns the current load factor (between 0 and 1).
+- `getStats()`: Returns detailed statistics about the filter.
 
-### async insert(item)
+## Implementation Details
 
-Insert an item into the filter.
+This cuckoo filter implementation uses:
 
-### contains(item)
+1. **Two Hash Functions**: To determine the two possible bucket locations for each item
+2. **Fingerprinting**: Instead of storing the full items, we store small fingerprints
+3. **Cuckoo Hashing**: Items that cannot be placed directly are inserted using the cuckoo displacement strategy
+4. **Power-of-2 Sizing**: Bucket count is always a power of 2 for efficient modulo operations
 
-Check if the item exists in the filter.
+## Performance Considerations
 
-### async delete(item)
-
-Remove an item from the filter.
-
-### async saveToParquet(filePath)
-
-Manually save the filter state to a Parquet file.
-
-### async loadFromParquet(filePath)
-
-Load the filter state from a Parquet file.
-
-### setHooks(hooks)
-
-Set hooks for custom actions on insert, delete, etc.
-
-### stats()
-
-Get usage statistics.
-
----
-
-## Summary
-
-Advanced Cuckoo Filter is a Node.js library implementing a high-performance Cuckoo Filter with support for persistence and dynamic resizing. It can efficiently handle membership testing with probabilistic guarantees, while providing the ability to save and restore filter state using Parquet or JSON files.
-
-### Key Highlights
-
-- Persistence via Parquet/JSON for stateful filters
-- Dynamic resizing to handle growing datasets
-- Fast insert, delete, and contains queries
-- Custom hooks for operation lifecycle events
-- Usage statistics for monitoring filter health and capacity
-
-### Use Cases
-
-- Duplicate detection in streaming data
-- Memory-efficient cache invalidation
-- Approximate membership queries in large-scale applications
-
----
-
+- **Fingerprint Size**: Larger fingerprints reduce false positives but increase memory usage
+- **Bucket Size**: Larger bucket sizes increase the load factor threshold but may slow down lookups
+- **Load Factor**: Performance degrades as the filter approaches its capacity
